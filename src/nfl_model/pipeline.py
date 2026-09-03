@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from nfl_model import __version__
 from nfl_model.audit.validation import assert_simulation_reconciliation, validate_player_map, validate_slate
 from nfl_model.boards.builder import build_boards
+from nfl_model.boards.forecast import build_full_forecast_boards, build_market_lined_pick_boards
 from nfl_model.config import AppConfig
 from nfl_model.features.team import build_team_state
 from nfl_model.features.current_role import enrich_player_map_with_current_context, bootstrap_missing_role_states
@@ -887,8 +888,34 @@ def _provider_health_json(health: dict, odds_client: OddsAPIClient | None) -> di
     return out
 
 
-def _final_boards_markdown(run_id: str, boards: dict[str, pd.DataFrame]) -> str:
-    parts = [f"# NFL Final Boards — {run_id}", "", "Python pricing snapshot only. Trading decisions occur after handoff.", ""]
+def _final_boards_markdown(run_id: str, boards: dict[str, pd.DataFrame],
+                           forecast_boards: dict[str, pd.DataFrame] | None = None,
+                           market_pick_boards: dict[str, pd.DataFrame] | None = None) -> str:
+    parts = [
+        f"# NFL Final Boards — {run_id}", "",
+        "Python pricing snapshot only. Trading decisions occur after handoff.", "",
+        "## Board Doctrine", "",
+        "- Full Forecast Boards are market-blind calibration forecasts for every player/stat series produced by the simulator.",
+        "- Market-Lined Pick Boards choose the model's more probable OVER/UNDER side at the consensus posted line; they are not EV plays.",
+        "- EV Play Board is the price-sensitive actionable board and remains separate from forecast accuracy tracking.",
+        "- Actual entry, closing line, result grading, CLV, and Dataset B remain Trading-Agent responsibilities.", "",
+    ]
+    forecast_boards = forecast_boards or {}
+    for title, key in [("Receiving Forecast Board", "receiving"), ("Rushing Forecast Board", "rushing"), ("Passing Forecast Board", "passing")]:
+        df = forecast_boards.get(key, pd.DataFrame())
+        parts += [f"## {title}", ""]
+        if df.empty:
+            parts += ["No modeled rows.", ""]
+            continue
+        cols = [c for c in ["forecast_id", "game_label", "player_name", "position", "team", "stat", "model_mean", "model_median", "reference_line", "model_pick_side", "model_pick_probability_raw", "directional_strength", "role_certainty_score"] if c in df.columns]
+        parts += [df[cols].head(150).to_markdown(index=False), ""]
+    mp = market_pick_boards.get("all", pd.DataFrame()) if market_pick_boards else pd.DataFrame()
+    parts += ["## Market-Lined Most-Probable Side Board", ""]
+    if mp.empty:
+        parts += ["No market-lined rows.", ""]
+    else:
+        cols = [c for c in ["market_pick_id", "game_label", "player_name", "market_key", "consensus_line", "model_pick_side", "model_pick_probability_raw", "best_posted_price_for_pick", "best_posted_book_for_pick", "directional_strength"] if c in mp.columns]
+        parts += [mp[cols].head(200).to_markdown(index=False), ""]
     for title, key in [("EV Play Board", "ev"), ("Edge Leaderboard", "leaderboard"), ("Rejections", "rejection")]:
         df = boards.get(key, pd.DataFrame())
         parts += [f"## {title}", ""]
@@ -911,6 +938,13 @@ def build_handoff(cfg: AppConfig, season: int, week: int, run_id: str, state: di
     run_dir.mkdir(parents=True)
     priced = _annotate_convergence(cfg, priced, sim_draws)
     boards = build_boards(priced, run_id)
+    forecast_snapshot_time = utc_now_iso()
+    forecast_boards = build_full_forecast_boards(
+        sim_draws, sim_summary, state["slate"], state["player_map"], run_id, forecast_snapshot_time
+    )
+    market_pick_boards = build_market_lined_pick_boards(
+        priced, sim_draws, state["slate"], state["player_map"], run_id, forecast_snapshot_time
+    )
     priced_snapshot = pd.concat([boards["opportunity"], boards["production"]], ignore_index=True, sort=False)
 
     slate = state["slate"].copy()
@@ -922,6 +956,14 @@ def build_handoff(cfg: AppConfig, season: int, week: int, run_id: str, state: di
     _write_csv(state["team_state"], run_dir / f"NFL_TEAM_STATE_{season}-W{week:02d}.csv")
     _write_csv(player_roles, run_dir / f"NFL_PLAYER_ROLE_STATE_{season}-W{week:02d}.csv")
     _write_csv(game_pricing, run_dir / f"NFL_GAME_PRICING_BOARD_{season}-W{week:02d}.csv")
+    _write_csv(forecast_boards["all"], run_dir / f"NFL_ALL_PLAYER_FORECAST_BOARD_{season}-W{week:02d}.csv")
+    _write_csv(forecast_boards["receiving"], run_dir / f"NFL_RECEIVING_FORECAST_BOARD_{season}-W{week:02d}.csv")
+    _write_csv(forecast_boards["rushing"], run_dir / f"NFL_RUSHING_FORECAST_BOARD_{season}-W{week:02d}.csv")
+    _write_csv(forecast_boards["passing"], run_dir / f"NFL_PASSING_FORECAST_BOARD_{season}-W{week:02d}.csv")
+    _write_csv(market_pick_boards["all"], run_dir / f"NFL_MARKET_LINED_PICK_BOARD_{season}-W{week:02d}.csv")
+    _write_csv(market_pick_boards["receiving"], run_dir / f"NFL_RECEIVING_MARKET_PICK_BOARD_{season}-W{week:02d}.csv")
+    _write_csv(market_pick_boards["rushing"], run_dir / f"NFL_RUSHING_MARKET_PICK_BOARD_{season}-W{week:02d}.csv")
+    _write_csv(market_pick_boards["passing"], run_dir / f"NFL_PASSING_MARKET_PICK_BOARD_{season}-W{week:02d}.csv")
     _write_csv(boards["opportunity"], run_dir / f"NFL_OPPORTUNITY_PROP_BOARD_{season}-W{week:02d}.csv")
     _write_csv(boards["production"], run_dir / f"NFL_PRODUCTION_PROP_BOARD_{season}-W{week:02d}.csv")
     _write_csv(boards["ev"], run_dir / f"NFL_EV_PLAY_BOARD_{season}-W{week:02d}.csv")
@@ -942,7 +984,17 @@ def build_handoff(cfg: AppConfig, season: int, week: int, run_id: str, state: di
     health = _provider_health_json(state.get("provider_health", {}), odds_client)
     (run_dir / f"NFL_PROVIDER_HEALTH_{season}-W{week:02d}.json").write_text(json.dumps(health, indent=2, sort_keys=True), encoding="utf-8")
     (run_dir / f"NFL_ODDS_QUOTA_REPORT_{season}-W{week:02d}.json").write_text(json.dumps(quota_report, indent=2, sort_keys=True), encoding="utf-8")
-    metadata = {"model_version": __version__, "market_scope": list(cfg.markets.get("markets", {}).keys()), "pipeline_boundary": boundary_manifest()}
+    metadata = {
+        "model_version": __version__,
+        "market_scope": list(cfg.markets.get("markets", {}).keys()),
+        "pipeline_boundary": boundary_manifest(),
+        "board_doctrine": {
+            "full_forecast_boards": "MARKET_BLIND_CALIBRATION_FORECASTS_NOT_BETS",
+            "market_lined_pick_boards": "MOST_PROBABLE_SIDE_AT_CONSENSUS_POSTED_LINE_NOT_EV_FILTERED",
+            "ev_play_board": "PRICE_SENSITIVE_CONSERVATIVE_EV_ACTIONABLE_ONLY",
+            "grading_owner": "CLAUDE_NFL_TRADING_AGENT_DATASET_B",
+        },
+    }
     (run_dir / "NFL_MODEL_METADATA.json").write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
     (run_dir / "NFL_DATA_LINEAGE.json").write_text(json.dumps(lineage, indent=2, sort_keys=True), encoding="utf-8")
     manifest = {
@@ -952,7 +1004,9 @@ def build_handoff(cfg: AppConfig, season: int, week: int, run_id: str, state: di
         "pipeline_boundary": boundary_manifest(),
     }
     (run_dir / f"NFL_RUN_MANIFEST_{season}-W{week:02d}.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
-    (run_dir / f"NFL_FINAL_BOARDS_{season}-W{week:02d}.md").write_text(_final_boards_markdown(run_id, boards), encoding="utf-8")
+    (run_dir / f"NFL_FINAL_BOARDS_{season}-W{week:02d}.md").write_text(
+        _final_boards_markdown(run_id, boards, forecast_boards, market_pick_boards), encoding="utf-8"
+    )
     write_handoff_readme(run_dir / "README.md", run_id)
 
     zip_path = outputs_root / f"NFL_TRADING_AGENT_HANDOFF_{season}-W{week:02d}_{run_id}.zip"
@@ -998,11 +1052,9 @@ def run_live(cfg: AppConfig, season: int, week: int, draws_n: int | None = None,
         main_df["aita_event_id"] = main_df["odds_api_event_id"].astype(str).map(event_to_aita)
         main_df = main_df[main_df["aita_event_id"].notna()].copy()
 
-    # No-odds simulation above is the independent baseline. Mainlines now act only as a
-    # bounded game-script anchor, after which the final joint player distributions are rerun.
+    # Layer 1 remains permanently market-blind. Mainlines are stored as a pricing/challenger
+    # context only and MUST NOT overwrite the original football forecast distributions.
     game_anchors = _extract_mainline_anchors(main_df, state["slate"])
-    if game_anchors:
-        sim_draws, sim_summary, recon = simulate_slate(cfg, season, week, state, draws_n, game_anchors=game_anchors)
 
     prop_frames = []
     for ev in eligible_events:

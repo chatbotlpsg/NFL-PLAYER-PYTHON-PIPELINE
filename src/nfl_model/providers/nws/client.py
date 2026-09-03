@@ -11,7 +11,7 @@ class NWSClient:
         self.timeout = timeout
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": os.getenv("NWS_USER_AGENT", "AITA-NFL-MODEL/0.3.0a2"),
+            "User-Agent": os.getenv("NWS_USER_AGENT", "AITA-NFL-MODEL/0.3.0a3"),
             "Accept": "application/geo+json",
         })
 

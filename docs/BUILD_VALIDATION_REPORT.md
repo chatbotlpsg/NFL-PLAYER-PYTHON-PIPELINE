@@ -1,6 +1,6 @@
 # AITA NFL Model V1 — Build Validation Report
 
-Build version: `0.3.0a2`  
+Build version: `0.3.0a3`  
 Target: NFL 2026 opportunity-first player alpha pipeline
 
 ## Locked scope implemented
@@ -37,7 +37,7 @@ Configuration validation:
 
 ```text
 STATUS: OK
-MODEL_VERSION: 0.3.0a2
+MODEL_VERSION: 0.3.0a3
 ```
 
 Quota dry-run, 16 events / 6 shortlisted games / three books:

@@ -1,7 +1,7 @@
 project:
   name: AITA NFL Opportunity-First Player Alpha Pipeline
   season: 2026
-  model_version: 0.3.0a2
+  model_version: 0.3.0a3
   random_seed: 260901
 
 history:
@@ -11,9 +11,9 @@ history:
 
 simulation:
   development_draws: 50000
-  production_draws: 100000
+  production_draws: 500000
   max_draws: 500000
-  convergence_checkpoints: [25000, 50000, 100000, 200000]
+  convergence_checkpoints: [25000, 50000, 100000, 200000, 500000]
   probability_tolerance: 0.004
 
 odds:

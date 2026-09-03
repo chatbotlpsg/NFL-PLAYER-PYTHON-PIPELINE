@@ -9,7 +9,8 @@ from dotenv import load_dotenv
 
 from nfl_model.config import load_config
 from nfl_model.package.handoff import deterministic_zip
-from nfl_model.pipeline import ingest_football, run_demo, run_live, simulate_slate
+from nfl_model.boards.forecast import build_full_forecast_boards, write_layer1_forecast_snapshot
+from nfl_model.pipeline import ingest_football, make_run_id, run_demo, run_live, simulate_slate
 from nfl_model.providers.odds_api.client import OddsAPIClient
 from nfl_model.providers.odds_api.normalize import normalize_event_odds
 from nfl_model.providers.odds_api.quota import estimate_plan
@@ -140,7 +141,22 @@ def main(argv=None) -> int:
         out.mkdir(parents=True, exist_ok=True)
         summary.to_parquet(out / "simulation_summary.parquet", index=False)
         (out / "simulation_reconciliation.json").write_text(json.dumps(recon, indent=2), encoding="utf-8")
-        print(f"DRAWS={args.draws}\nSERIES={len(draws)}\nOUT={out}")
+        snapshot_id = make_run_id(args.season, args.week) + "-LAYER1"
+        snapshot_time = utc_now_iso()
+        forecast_boards = build_full_forecast_boards(
+            draws, summary, state["slate"], state["player_map"], snapshot_id, snapshot_time
+        )
+        paths = write_layer1_forecast_snapshot(
+            forecast_boards, out, args.season, args.week, snapshot_id
+        )
+        print(
+            f"DRAWS={args.draws}\nSERIES={len(draws)}\nOUT={out}\n"
+            f"FORECAST_SNAPSHOT_ID={snapshot_id}\n"
+            f"RECEIVING_BOARD_ROWS={len(forecast_boards['receiving'])}\n"
+            f"RUSHING_BOARD_ROWS={len(forecast_boards['rushing'])}\n"
+            f"PASSING_BOARD_ROWS={len(forecast_boards['passing'])}\n"
+            f"FORECAST_SNAPSHOT_DIR={paths['all'].parent}"
+        )
         return 0
 
     if cmd in {"fetch-mainlines", "fetch-opportunity-odds", "fetch-shortlist-yardage", "reprice"}:

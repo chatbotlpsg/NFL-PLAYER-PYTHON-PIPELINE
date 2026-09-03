@@ -1,6 +1,6 @@
 # Layer-1 → Opportunity-First V1 Full-Build Hardening
 
-Build version: `0.3.0a2`
+Build version: `0.3.0a3`
 
 This package retains the Layer-1 repository structure but hardens it against the controlling 2026 NFL opportunity-first and Python/Trading-Agent boundary specifications.
 

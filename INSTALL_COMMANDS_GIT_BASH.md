@@ -62,7 +62,7 @@ ODDS_API_KEY=YOUR_KEY_HERE
 Recommended NWS user-agent:
 
 ```text
-NWS_USER_AGENT=AITA-NFL-MODEL/0.3.0a2 (contact: your-email@example.com)
+NWS_USER_AGENT=AITA-NFL-MODEL/0.3.0a3 (contact: your-email@example.com)
 ```
 
 Never commit `.env` and never put the key in the handoff ZIP.

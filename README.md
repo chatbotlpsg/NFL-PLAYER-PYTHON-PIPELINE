@@ -1,6 +1,6 @@
 # AITA NFL Opportunity-First Player Alpha Pipeline
 
-Version: `0.3.0a2`  
+Version: `0.3.0a3`  
 Season target: NFL 2026  
 Production doctrine: **Model opportunity first. Model production second. Price the market third. Trade outside Python.**
 
@@ -77,7 +77,7 @@ Edit `.env` and set:
 
 ```text
 ODDS_API_KEY=YOUR_KEY_HERE
-NWS_USER_AGENT=AITA-NFL-MODEL/0.3.0a2 (contact: your-email@example.com)
+NWS_USER_AGENT=AITA-NFL-MODEL/0.3.0a3 (contact: your-email@example.com)
 ```
 
 Never commit `.env`.
@@ -197,3 +197,24 @@ data/outputs    immutable run directories + handoff ZIPs
 ```
 
 Do not manually edit raw provider responses.
+
+## v0.3.0a3 — Full Slate Forecast Board Architecture
+
+Every simulation now produces **market-blind calibration forecast boards** in addition to the existing price-sensitive EV boards:
+
+- `NFL_RECEIVING_FORECAST_BOARD_<season>-W<week>.csv`
+- `NFL_RUSHING_FORECAST_BOARD_<season>-W<week>.csv`
+- `NFL_PASSING_FORECAST_BOARD_<season>-W<week>.csv`
+- `NFL_ALL_PLAYER_FORECAST_BOARD_<season>-W<week>.csv`
+
+Each modeled player/stat row contains the full Monte Carlo distribution (`mean`, `median`, P10/P25/P75/P90), a model-native half-point calibration reference line, raw OVER and UNDER probabilities, the model's most-probable side, fair odds for that side, role certainty, and a stable calibration key.
+
+The handoff also contains **Market-Lined Pick Boards**. These select the model's more probable OVER/UNDER side at the consensus posted sportsbook line whether or not the price clears the EV threshold. This keeps three concepts separate:
+
+1. **Full Forecast Board** — football-model forecast/calibration universe; market-blind and not a bet recommendation.
+2. **Market-Lined Pick Board** — most probable side at an actual posted line; probability-first and not EV-filtered.
+3. **EV Play Board** — price-sensitive actionable plays that clear conservative EV requirements.
+
+`simulate` preserves every Layer-1 board run in an immutable `forecast_snapshots/<snapshot_id>/` directory while also updating convenient latest-copy CSVs. Actual results, grading, closing lines and CLV remain Dataset-B responsibilities of the separate NFL Trading Agent.
+
+Production simulation count is locked to **500,000 draws** unless explicitly overridden for development/testing.
