@@ -139,7 +139,7 @@ def ingest_football(cfg: AppConfig, season: int, week: int) -> dict[str, Any]:
     health: dict[str, Any] = {}
 
     espn = ESPNClient(cfg.get("providers", "espn_base"), timeout=int(cfg.get("providers", "request_timeout_seconds", default=20)))
-    scoreboard = espn.get_weekly_slate(week)
+    scoreboard = espn.get_weekly_slate(season, week)
     snap = save_json_snapshot(raw_dir, "espn", season, week, "scoreboard", scoreboard)
     slate = normalize_scoreboard(scoreboard, season, week)
     errors = validate_slate(slate)
@@ -165,33 +165,247 @@ def ingest_football(cfg: AppConfig, season: int, week: int) -> dict[str, Any]:
     )
     health["espn_scoreboard"] = "OK"
 
-    roster_frames, depth_frames, injury_frames = [], [], []
+    roster_frames, depth_frames = [], []
+
     team_pairs: dict[str, str] = {}
+
     for _, game in slate.iterrows():
-        team_pairs[game["home_team"]] = str(game["home_espn_team_id"])
-        team_pairs[game["away_team"]] = str(game["away_espn_team_id"])
-    for team, team_id in sorted(team_pairs.items()):
+        team_pairs[
+            game["home_team"]
+        ] = str(
+            game["home_espn_team_id"]
+        )
+
+        team_pairs[
+            game["away_team"]
+        ] = str(
+            game["away_espn_team_id"]
+        )
+
+    team_id_to_abbr = {
+        team_id: team
+        for team, team_id
+        in team_pairs.items()
+    }
+
+    # --------------------------------------------------------
+    # CURRENT ROSTERS + DEPTH CHARTS
+    #
+    # These calls are independent.
+    #
+    # A roster failure must NOT suppress a healthy depth-chart
+    # call for the same team.
+    # --------------------------------------------------------
+
+    for team, team_id in sorted(
+        team_pairs.items()
+    ):
+
         try:
-            rj = espn.get_roster(team_id)
-            save_json_snapshot(raw_dir, "espn", season, week, f"roster_{team}", rj)
-            roster_frames.append(normalize_roster(rj, team))
-            dj = espn.get_depth_chart(team_id)
-            save_json_snapshot(raw_dir, "espn", season, week, f"depthchart_{team}", dj)
-            depth_frames.append(normalize_depth_chart(dj, team))
-            ij = espn.get_injuries(team_id)
-            save_json_snapshot(raw_dir, "espn", season, week, f"injuries_{team}", ij)
-            injury_frames.append(normalize_injuries(ij, team))
+            rj = espn.get_roster(
+                team_id
+            )
+
+            save_json_snapshot(
+                raw_dir,
+                "espn",
+                season,
+                week,
+                f"roster_{team}",
+                rj,
+            )
+
+            roster_frames.append(
+                normalize_roster(
+                    rj,
+                    team,
+                )
+            )
+
+            health[
+                f"espn_{team}_roster"
+            ] = "OK"
+
         except Exception as exc:
-            health[f"espn_{team}"] = f"DEGRADED:{type(exc).__name__}"
-    rosters = pd.concat(roster_frames, ignore_index=True) if roster_frames else pd.DataFrame()
-    depths = pd.concat(depth_frames, ignore_index=True) if depth_frames else pd.DataFrame()
-    injuries = pd.concat(injury_frames, ignore_index=True) if injury_frames else pd.DataFrame()
-    rosters.to_csv(normalized_dir / "fact_roster_snapshot.csv", index=False)
-    depths.to_csv(normalized_dir / "fact_depth_chart_snapshot.csv", index=False)
-    injuries.to_csv(normalized_dir / "fact_injury_snapshot.csv", index=False)
-    health["espn_rosters"] = "OK" if not rosters.empty else "DEGRADED"
-    health["espn_depthcharts"] = "OK" if not depths.empty else "DEGRADED"
-    health["espn_injuries"] = "OK" if not injuries.empty else "DEGRADED"
+
+            health[
+                f"espn_{team}_roster"
+            ] = (
+                f"DEGRADED:"
+                f"{type(exc).__name__}"
+            )
+
+        try:
+            dj = espn.get_depth_chart(
+                team_id
+            )
+
+            save_json_snapshot(
+                raw_dir,
+                "espn",
+                season,
+                week,
+                f"depthchart_{team}",
+                dj,
+            )
+
+            depth_frames.append(
+                normalize_depth_chart(
+                    dj,
+                    team,
+                )
+            )
+
+            health[
+                f"espn_{team}_depthchart"
+            ] = "OK"
+
+        except Exception as exc:
+
+            health[
+                f"espn_{team}_depthchart"
+            ] = (
+                f"DEGRADED:"
+                f"{type(exc).__name__}"
+            )
+
+    # --------------------------------------------------------
+    # CURRENT INJURIES
+    #
+    # ESPN team-specific injury endpoints are currently
+    # returning empty objects.
+    #
+    # The league-wide endpoint contains the real 2026
+    # injury state, grouped by ESPN team ID.
+    #
+    # Fetch ONCE and normalize by canonical team.
+    # --------------------------------------------------------
+
+    injuries = pd.DataFrame()
+
+    try:
+        league_injuries_json = (
+            espn.get_injuries()
+        )
+
+        save_json_snapshot(
+            raw_dir,
+            "espn",
+            season,
+            week,
+            "injuries_league",
+            league_injuries_json,
+        )
+
+        injuries = normalize_injuries(
+            league_injuries_json,
+            team_id_to_abbr=(
+                team_id_to_abbr
+            ),
+        )
+
+        # Provider health reflects successful retrieval and
+        # schema normalization, NOT whether zero players happen
+        # to be injured.
+        health[
+            "espn_injuries"
+        ] = "OK"
+
+    except Exception as exc:
+
+        health[
+            "espn_injuries"
+        ] = (
+            f"DEGRADED:"
+            f"{type(exc).__name__}"
+        )
+
+    rosters = (
+        pd.concat(
+            roster_frames,
+            ignore_index=True,
+        )
+        if roster_frames
+        else pd.DataFrame(
+            columns=[
+                "espn_athlete_id",
+                "full_name",
+                "position",
+                "current_team",
+                "jersey",
+                "active_flag",
+            ]
+        )
+    )
+
+    depths = (
+        pd.concat(
+            depth_frames,
+            ignore_index=True,
+        )
+        if depth_frames
+        else pd.DataFrame(
+            columns=[
+                "team",
+                "unit",
+                "position",
+                "rank",
+                "espn_athlete_id",
+                "player_name",
+            ]
+        )
+    )
+
+    if (
+        injuries.empty
+        and len(injuries.columns) == 0
+    ):
+        injuries = pd.DataFrame(
+            columns=[
+                "team",
+                "espn_team_id",
+                "injury_id",
+                "espn_athlete_id",
+                "player_name",
+                "status",
+                "date",
+                "details",
+            ]
+        )
+
+    rosters.to_csv(
+        normalized_dir
+        / "fact_roster_snapshot.csv",
+        index=False,
+    )
+
+    depths.to_csv(
+        normalized_dir
+        / "fact_depth_chart_snapshot.csv",
+        index=False,
+    )
+
+    injuries.to_csv(
+        normalized_dir
+        / "fact_injury_snapshot.csv",
+        index=False,
+    )
+
+    health[
+        "espn_rosters"
+    ] = (
+        "OK"
+        if not rosters.empty
+        else "DEGRADED"
+    )
+
+    health[
+        "espn_depthcharts"
+    ] = (
+        "OK"
+        if not depths.empty
+        else "DEGRADED"
+    )
 
     transactions = pd.DataFrame()
     try:
@@ -235,9 +449,35 @@ def ingest_football(cfg: AppConfig, season: int, week: int) -> dict[str, Any]:
     player_map = _merge_espn_ids(player_map, rosters)
     player_map = enrich_player_map_with_current_context(player_map, rosters, depths, injuries)
     degraded_current_state_teams = {
-        team for team in team_pairs
-        if str(health.get(f"espn_{team}", "OK")).startswith("DEGRADED")
+        team
+        for team in team_pairs
+        if any(
+            str(
+                health.get(
+                    f"espn_{team}_{component}",
+                    "OK",
+                )
+            ).startswith("DEGRADED")
+            for component in (
+                "roster",
+                "depthchart",
+            )
+        )
     }
+
+    # A failed league-wide injury snapshot is critical for
+    # all player-prop teams because availability cannot be
+    # verified.
+    if str(
+        health.get(
+            "espn_injuries",
+            "OK",
+        )
+    ).startswith("DEGRADED"):
+
+        degraded_current_state_teams.update(
+            team_pairs.keys()
+        )
     if not player_map.empty:
         player_map["critical_current_state_ok"] = ~player_map["current_team"].isin(degraded_current_state_teams)
         player_map.loc[~player_map["critical_current_state_ok"], "data_freshness_score"] = 0.0
@@ -412,19 +652,145 @@ def simulate_slate(cfg: AppConfig, season: int, week: int, state: dict[str, Any]
     state["game_sim_summary"] = games_df
     return all_draws, player_summary, reconciliations
 
-def _map_odds_events(odds_events: list[dict], slate: pd.DataFrame) -> tuple[dict[str, str], dict[str, set[str]]]:
-    by_matchup: dict[frozenset[str], str] = {}
-    for _, g in slate.iterrows():
-        by_matchup[frozenset([g["home_team"], g["away_team"]])] = g["aita_event_id"]
-    event_to_aita, event_teams = {}, {}
+def _map_odds_events(
+    odds_events: list[dict],
+    slate: pd.DataFrame,
+    max_time_delta_hours: float = 12.0,
+) -> tuple[dict[str, str], dict[str, set[str]]]:
+    """One-to-one Odds API -> AITA event mapping.
+
+    Match on:
+      1. exact home team
+      2. exact away team
+      3. kickoff-time proximity
+
+    Kickoff is mandatory because the Odds API may return games from
+    multiple future weeks and NFL opponents can meet more than once.
+    """
+
+    if slate.empty:
+        return {}, {}
+
+    s = slate.copy()
+
+    s["_kickoff_utc"] = pd.to_datetime(
+        s["kickoff_utc"],
+        utc=True,
+        errors="coerce",
+    )
+
+    candidates = []
+
     for ev in odds_events:
-        home = team_from_full_name(ev.get("home_team", ""))
-        away = team_from_full_name(ev.get("away_team", ""))
-        aid = by_matchup.get(frozenset([home, away]))
-        if aid:
-            event_to_aita[str(ev["id"])] = aid
-            event_teams[str(ev["id"])] = {home, away}
-    return event_to_aita, event_teams
+        odds_id = str(
+            ev.get("id") or ""
+        )
+
+        home = team_from_full_name(
+            ev.get("home_team", "")
+        )
+
+        away = team_from_full_name(
+            ev.get("away_team", "")
+        )
+
+        commence = pd.to_datetime(
+            ev.get("commence_time"),
+            utc=True,
+            errors="coerce",
+        )
+
+        if (
+            not odds_id
+            or not home
+            or not away
+            or pd.isna(commence)
+        ):
+            continue
+
+        possible = s[
+            s["home_team"].astype(str).eq(home)
+            &
+            s["away_team"].astype(str).eq(away)
+        ].copy()
+
+        if possible.empty:
+            continue
+
+        possible["_delta"] = (
+            possible["_kickoff_utc"]
+            - commence
+        ).abs()
+
+        possible = possible[
+            possible["_delta"]
+            <= pd.Timedelta(
+                hours=max_time_delta_hours
+            )
+        ]
+
+        if possible.empty:
+            continue
+
+        best_idx = (
+            possible["_delta"]
+            .idxmin()
+        )
+
+        best = possible.loc[
+            best_idx
+        ]
+
+        candidates.append(
+            (
+                best["_delta"],
+                odds_id,
+                str(best["aita_event_id"]),
+                home,
+                away,
+            )
+        )
+
+    # Enforce one-to-one assignment.
+    candidates.sort(
+        key=lambda x: x[0]
+    )
+
+    event_to_aita: dict[str, str] = {}
+    event_teams: dict[str, set[str]] = {}
+
+    used_aita: set[str] = set()
+
+    for (
+        _delta,
+        odds_id,
+        aita_id,
+        home,
+        away,
+    ) in candidates:
+
+        if aita_id in used_aita:
+            continue
+
+        event_to_aita[
+            odds_id
+        ] = aita_id
+
+        event_teams[
+            odds_id
+        ] = {
+            home,
+            away,
+        }
+
+        used_aita.add(
+            aita_id
+        )
+
+    return (
+        event_to_aita,
+        event_teams,
+    )
 
 
 def _extract_mainline_anchors(main_df: pd.DataFrame, slate: pd.DataFrame) -> dict[str, dict[str, float]]:

@@ -13,7 +13,17 @@ class ESPNClient:
         self.timeout = timeout
         self.max_retries = max_retries
         self.session = requests.Session()
-        self.session.headers.update({"User-Agent": "AITA-NFL-MODEL/0.3.0a2"})
+        self.session.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/151.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json,text/plain,*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.espn.com/",
+            "Origin": "https://www.espn.com",
+        })
 
     def _get(self, resource: str, params: dict[str, Any] | None = None) -> dict:
         url = f"{self.base_url}/{resource.lstrip('/')}"
@@ -32,14 +42,30 @@ class ESPNClient:
                     time.sleep(0.6 * (2**attempt))
         raise RuntimeError(f"ESPN request failed: {resource}") from last_exc
 
-    def get_weekly_slate(self, week: int, season_type: int = 2) -> dict:
-        return self._get("scoreboard", {"week": week, "seasontype": season_type})
+    def get_weekly_slate(self, season: int, week: int, season_type: int = 2) -> dict:
+        return self._get(
+            "scoreboard",
+            {
+                "dates": str(season),
+                "week": week,
+                "seasontype": season_type,
+            },
+        )
 
     def get_teams(self) -> dict:
         return self._get("teams", {"limit": 32})
 
     def get_roster(self, team_id: str) -> dict:
-        return self._get(f"teams/{team_id}/roster")
+        try:
+            return self._get(f"teams/{team_id}/roster")
+        except RuntimeError:
+            # ESPN occasionally rejects or fails the dedicated roster
+            # surface for an individual team. The detailed-team endpoint
+            # also exposes the current roster under team.athletes.
+            return self._get(
+                f"teams/{team_id}",
+                {"enable": "roster"},
+            )
 
     def get_depth_chart(self, team_id: str) -> dict:
         return self._get(f"teams/{team_id}/depthcharts")

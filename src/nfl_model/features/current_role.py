@@ -45,7 +45,45 @@ def enrich_player_map_with_current_context(player_map: pd.DataFrame, rosters: pd
     if not depth.empty:
         d = depth.copy()
         d["espn_athlete_id"] = d["espn_athlete_id"].astype(str)
-        rank_map = d.dropna(subset=["espn_athlete_id"]).groupby("espn_athlete_id")["rank"].min().to_dict()
+
+        # Player-prop role certainty must come from the
+        # OFFENSIVE depth chart. A returner/special-teams
+        # rank must not accidentally promote an RB/WR/TE.
+        if "unit" in d.columns:
+            offense_mask = (
+                d["unit"]
+                .astype(str)
+                .str.contains(
+                    "off",
+                    case=False,
+                    na=False,
+                )
+            )
+
+            if offense_mask.any():
+                d = d[
+                    offense_mask
+                ].copy()
+
+        d = d[
+            d["espn_athlete_id"]
+            .astype(str)
+            .str.strip()
+            .ne("")
+            &
+            d["espn_athlete_id"]
+            .astype(str)
+            .str.lower()
+            .ne("nan")
+        ].copy()
+
+        rank_map = (
+            d.groupby(
+                "espn_athlete_id"
+            )["rank"]
+            .min()
+            .to_dict()
+        )
         p["depth_rank"] = p["espn_athlete_id"].astype(str).map(rank_map)
         p.loc[p["depth_rank"].eq(1), "role_certainty_score"] = np.minimum(98.0, pd.to_numeric(p.loc[p["depth_rank"].eq(1), "role_certainty_score"], errors="coerce").fillna(50) + 5)
         p.loc[p["depth_rank"].ge(3), "role_certainty_score"] = np.maximum(30.0, pd.to_numeric(p.loc[p["depth_rank"].ge(3), "role_certainty_score"], errors="coerce").fillna(50) - 8)
@@ -54,7 +92,26 @@ def enrich_player_map_with_current_context(player_map: pd.DataFrame, rosters: pd
     if not injuries.empty:
         i = injuries.copy()
         i["espn_athlete_id"] = i["espn_athlete_id"].astype(str)
-        status_map = i.dropna(subset=["espn_athlete_id"]).groupby("espn_athlete_id")["status"].last().to_dict()
+
+        # Unresolved injury rows remain preserved in the provider
+        # snapshot for audit, but may NEVER match a blank player ID.
+        i = i[
+            i["espn_athlete_id"]
+            .str.strip()
+            .ne("")
+            &
+            i["espn_athlete_id"]
+            .str.lower()
+            .ne("nan")
+        ].copy()
+
+        status_map = (
+            i.groupby(
+                "espn_athlete_id"
+            )["status"]
+            .last()
+            .to_dict()
+        )
         p["availability_status"] = p["espn_athlete_id"].astype(str).map(status_map).fillna("ACTIVE_OR_UNLISTED")
     upper = p["availability_status"].astype(str).str.upper()
     p["available_for_simulation"] = ~upper.isin(OUT_STATUSES)

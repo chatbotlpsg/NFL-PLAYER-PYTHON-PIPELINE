@@ -44,7 +44,11 @@ def normalize_scoreboard(payload: dict, season: int, week: int) -> pd.DataFrame:
 
 def normalize_roster(payload: dict, team: str) -> pd.DataFrame:
     rows = []
-    groups = payload.get("athletes", [])
+    groups = (
+        payload.get("athletes")
+        or ((payload.get("team") or {}).get("athletes"))
+        or []
+    )
     for group in groups:
         items = group.get("items") or []
         if not items and isinstance(group, dict) and group.get("id"):
@@ -63,38 +67,233 @@ def normalize_roster(payload: dict, team: str) -> pd.DataFrame:
 
 
 def normalize_depth_chart(payload: dict, team: str) -> pd.DataFrame:
+    columns = [
+        "team",
+        "unit",
+        "position",
+        "rank",
+        "espn_athlete_id",
+        "player_name",
+    ]
+
     rows = []
-    for chart in payload.get("depthCharts", []):
+
+    # ESPN currently returns lowercase singular "depthchart".
+    # Retain legacy support for "depthCharts" in case the provider changes again.
+    charts = (
+        payload.get("depthchart")
+        or payload.get("depthCharts")
+        or []
+    )
+
+    if isinstance(charts, dict):
+        charts = [charts]
+
+    for chart in charts:
+        if not isinstance(chart, dict):
+            continue
+
         unit = chart.get("name")
-        for _, position in (chart.get("positions") or {}).items():
+
+        positions = chart.get("positions") or {}
+
+        if isinstance(positions, list):
+            positions = {
+                str(i): value
+                for i, value in enumerate(positions)
+            }
+
+        for _, position in positions.items():
+            if not isinstance(position, dict):
+                continue
+
             p = position.get("position") or {}
-            pos = p.get("abbreviation") or p.get("name")
-            for item in position.get("athletes", []):
+
+            pos = (
+                p.get("abbreviation")
+                or p.get("name")
+            )
+
+            athletes = position.get("athletes") or []
+
+            for ordinal, item in enumerate(athletes, start=1):
+                if not isinstance(item, dict):
+                    continue
+
+                # ESPN currently places athlete fields directly in the list item.
+                # Older/alternate schemas may wrap them under "athlete".
                 athlete = item.get("athlete") or item
-                rows.append({
-                    "team": canonical_team(team),
-                    "unit": unit,
-                    "position": pos,
-                    "rank": item.get("rank"),
-                    "espn_athlete_id": str(athlete.get("id", "")),
-                    "player_name": athlete.get("displayName") or athlete.get("fullName"),
-                })
-    return pd.DataFrame(rows)
+
+                raw_rank = (
+                    item.get("rank")
+                    or item.get("depth")
+                    or item.get("order")
+                    or ordinal
+                )
+
+                try:
+                    rank = int(raw_rank)
+                except (TypeError, ValueError):
+                    rank = ordinal
+
+                rows.append(
+                    {
+                        "team": canonical_team(team),
+                        "unit": unit,
+                        "position": pos,
+                        "rank": rank,
+                        "espn_athlete_id": str(
+                            athlete.get("id", "")
+                        ),
+                        "player_name": (
+                            athlete.get("displayName")
+                            or athlete.get("fullName")
+                        ),
+                    }
+                )
+
+    return pd.DataFrame(rows, columns=columns)
 
 
-def normalize_injuries(payload: dict, team: str | None = None) -> pd.DataFrame:
-    rows = []
-    groups = payload.get("injuries") or payload.get("items") or []
-    if isinstance(groups, dict):
-        groups = [groups]
-    for item in groups:
+def normalize_injuries(
+    payload: dict,
+    team: str | None = None,
+    team_id_to_abbr: dict[str, str] | None = None,
+) -> pd.DataFrame:
+
+    columns = [
+        "team",
+        "espn_team_id",
+        "injury_id",
+        "espn_athlete_id",
+        "player_name",
+        "status",
+        "date",
+        "details",
+    ]
+
+    rows: list[dict[str, Any]] = []
+
+    id_map = {
+        str(k): canonical_team(v)
+        for k, v in (team_id_to_abbr or {}).items()
+    }
+
+    def add_row(
+        item: dict,
+        resolved_team: str | None,
+        espn_team_id: str | None = None,
+    ) -> None:
+
         athlete = item.get("athlete") or {}
         status = item.get("status")
-        rows.append({
-            "team": canonical_team(team or ((item.get("team") or {}).get("abbreviation", ""))),
-            "espn_athlete_id": str(athlete.get("id", "")),
-            "player_name": athlete.get("displayName") or athlete.get("fullName"),
-            "status": status.get("name") if isinstance(status, dict) else status,
-            "details": item.get("details") or item.get("shortComment") or item.get("longComment"),
-        })
-    return pd.DataFrame(rows)
+
+        rows.append(
+            {
+                "team": canonical_team(
+                    resolved_team or ""
+                ),
+                "espn_team_id": str(
+                    espn_team_id or ""
+                ),
+                "injury_id": str(
+                    item.get("id", "")
+                ),
+                "espn_athlete_id": str(
+                    athlete.get("id", "")
+                ),
+                "player_name": (
+                    athlete.get("displayName")
+                    or athlete.get("fullName")
+                ),
+                "status": (
+                    status.get("name")
+                    if isinstance(status, dict)
+                    else status
+                ),
+                "date": item.get("date"),
+                "details": (
+                    item.get("details")
+                    or item.get("shortComment")
+                    or item.get("longComment")
+                ),
+            }
+        )
+
+    groups = (
+        payload.get("injuries")
+        or payload.get("items")
+        or []
+    )
+
+    if isinstance(groups, dict):
+        groups = [groups]
+
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+
+        # League-wide ESPN injury schema:
+        #
+        # injuries:
+        #   - id: team_id
+        #     displayName: team
+        #     injuries:
+        #       - athlete: ...
+        #         status: ...
+        nested = group.get("injuries")
+
+        if isinstance(nested, list):
+            espn_team_id = str(
+                group.get("id")
+                or ((group.get("team") or {}).get("id"))
+                or ""
+            )
+
+            resolved_team = (
+                team
+                or id_map.get(espn_team_id)
+            )
+
+            if not resolved_team:
+                team_obj = group.get("team") or {}
+
+                resolved_team = (
+                    group.get("abbreviation")
+                    or team_obj.get("abbreviation")
+                )
+
+            for item in nested:
+                if isinstance(item, dict):
+                    add_row(
+                        item,
+                        resolved_team,
+                        espn_team_id,
+                    )
+
+            continue
+
+        # Retain support for a flat injury schema.
+        team_obj = group.get("team") or {}
+
+        espn_team_id = str(
+            team_obj.get("id")
+            or ""
+        )
+
+        resolved_team = (
+            team
+            or id_map.get(espn_team_id)
+            or team_obj.get("abbreviation")
+        )
+
+        add_row(
+            group,
+            resolved_team,
+            espn_team_id,
+        )
+
+    return pd.DataFrame(
+        rows,
+        columns=columns,
+    )
