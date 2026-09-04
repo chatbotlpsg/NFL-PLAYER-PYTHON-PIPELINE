@@ -44,6 +44,8 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--mode", choices=["production", "development"], default="production")
     run.add_argument("--draws", type=int)
     run.add_argument("--shortlist-events", type=int, default=6)
+    run.add_argument("--aita-event-id", action="append", help="Restrict production run to one or more AITA event IDs")
+    run.add_argument("--slate-label", help="Short label embedded in the immutable run id, e.g. WED_KICKOFF or SUN_DAY")
     sw("ingest-football")
     sim = sw("simulate")
     sim.add_argument("--draws", type=int, default=50000)
@@ -125,7 +127,10 @@ def main(argv=None) -> int:
 
     if cmd == "run":
         default_draws = cfg.get("simulation", "production_draws" if args.mode == "production" else "development_draws")
-        art = run_live(cfg, args.season, args.week, args.draws or int(default_draws), args.shortlist_events)
+        art = run_live(
+            cfg, args.season, args.week, args.draws or int(default_draws), args.shortlist_events,
+            selected_aita_event_ids=args.aita_event_id, slate_label=args.slate_label,
+        )
         print(f"RUN_ID={art.run_id}\nHANDOFF_ZIP={art.handoff_zip}")
         return 0
 

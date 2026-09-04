@@ -1,7 +1,7 @@
 project:
   name: AITA NFL Opportunity-First Player Alpha Pipeline
   season: 2026
-  model_version: 0.3.0a3
+  model_version: 0.3.0a4
   random_seed: 260901
 
 history:

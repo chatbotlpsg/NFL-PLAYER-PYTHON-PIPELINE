@@ -1014,10 +1014,79 @@ def build_handoff(cfg: AppConfig, season: int, week: int, run_id: str, state: di
     return PipelineArtifacts(run_id, run_dir, zip_path)
 
 
-def run_live(cfg: AppConfig, season: int, week: int, draws_n: int | None = None, shortlist_events: int = 6) -> PipelineArtifacts:
+
+def _subset_state_for_slate(state: dict[str, Any], selected_aita_event_ids: list[str] | None) -> dict[str, Any]:
+    """Return an in-memory slate subset without rewriting the normalized Week-level source tables."""
+    if not selected_aita_event_ids:
+        return state
+
+    wanted = {str(x).strip() for x in selected_aita_event_ids if str(x).strip()}
+    if not wanted:
+        return state
+
+    slate = state["slate"].copy()
+    slate["aita_event_id"] = slate["aita_event_id"].astype(str)
+    available = set(slate["aita_event_id"])
+    missing = sorted(wanted - available)
+    if missing:
+        raise RuntimeError(f"UNKNOWN_AITA_EVENT_IDS: {missing}")
+
+    slate = slate[slate["aita_event_id"].isin(wanted)].copy().reset_index(drop=True)
+    if slate.empty:
+        raise RuntimeError("EMPTY_SLATE_AFTER_EVENT_FILTER")
+
+    teams = set(slate["home_team"].astype(str)) | set(slate["away_team"].astype(str))
+    out = dict(state)
+    out["slate"] = slate
+    out["selected_aita_event_ids"] = sorted(wanted)
+
+    team_tables = {
+        "rosters": "current_team",
+        "depths": "team",
+        "injuries": "team",
+        "team_state": "team",
+        "qb_state": "team",
+        "rb_state": "team",
+        "rec_state": "team",
+        "coaching_state": "team",
+        "matchup_state": "team",
+        "player_map": "current_team",
+    }
+    for key, col in team_tables.items():
+        df = out.get(key)
+        if isinstance(df, pd.DataFrame) and not df.empty and col in df.columns:
+            out[key] = df[df[col].astype(str).isin(teams)].copy().reset_index(drop=True)
+
+    weather = out.get("weather")
+    if isinstance(weather, pd.DataFrame) and not weather.empty and "aita_event_id" in weather.columns:
+        out["weather"] = weather[weather["aita_event_id"].astype(str).isin(wanted)].copy().reset_index(drop=True)
+
+    return out
+
+
+def _safe_slate_label(value: str | None) -> str | None:
+    if value is None:
+        return None
+    label = re.sub(r"[^A-Za-z0-9_-]+", "_", str(value).strip().upper()).strip("_")
+    return label or None
+
+
+def run_live(
+    cfg: AppConfig,
+    season: int,
+    week: int,
+    draws_n: int | None = None,
+    shortlist_events: int = 6,
+    selected_aita_event_ids: list[str] | None = None,
+    slate_label: str | None = None,
+) -> PipelineArtifacts:
     load_dotenv(cfg.root / ".env")
     run_id = make_run_id(season, week)
+    label = _safe_slate_label(slate_label)
+    if label:
+        run_id = f"{run_id}-{label}"
     state = ingest_football(cfg, season, week)
+    state = _subset_state_for_slate(state, selected_aita_event_ids)
     draws_n = int(draws_n or cfg.get("simulation", "production_draws", default=100000))
     sim_draws, sim_summary, recon = simulate_slate(cfg, season, week, state, draws_n)
 
@@ -1036,7 +1105,11 @@ def run_live(cfg: AppConfig, season: int, week: int, draws_n: int | None = None,
     event_map_path = Path(state["normalized_dir"]) / "entity_map_event.csv"
     event_map = pd.read_csv(event_map_path) if event_map_path.exists() else state["slate"][["aita_event_id"]].copy()
     inv_event = {aita: odds for odds, aita in event_to_aita.items()}
-    event_map["odds_api_event_id"] = event_map["aita_event_id"].astype(str).map(inv_event)
+    new_odds_ids = event_map["aita_event_id"].astype(str).map(inv_event)
+    if "odds_api_event_id" in event_map.columns:
+        event_map["odds_api_event_id"] = new_odds_ids.combine_first(event_map["odds_api_event_id"])
+    else:
+        event_map["odds_api_event_id"] = new_odds_ids
     event_map.to_csv(event_map_path, index=False)
 
     plan = estimate_plan(len(eligible_events), len(odds_cfg["opportunity_markets"]), len(odds_cfg["production_markets"]),
@@ -1142,6 +1215,8 @@ def run_live(cfg: AppConfig, season: int, week: int, draws_n: int | None = None,
         "entity_join_rule": "NAME + EVENT TEAM (+ POSITION when available); ambiguous rows quarantined",
         "simulation_reconciliation": recon,
         "mainline_game_anchors": game_anchors,
+        "slate_label": label,
+        "selected_aita_event_ids": sorted(state.get("selected_aita_event_ids", [])),
     }
     return build_handoff(cfg, season, week, run_id, state, sim_draws, sim_summary, priced, _build_game_pricing_board(main_df, state["slate"], sim_draws), odds_client, quota_report, lineage)
 
